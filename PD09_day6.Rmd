@@ -9,3 +9,594 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+
+
+
+```{r}
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#   install.packages("BiocManager")
+# BiocManager::install("glmGamPoi")
+# install.packages("remotes")
+# remotes::install_github('chris-mcginnis-ucsf/DoubletFinder', force = T)
+# install.packages('devtools')
+# devtools::install_github('immunogenomics/presto')
+```
+
+```{r library}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(Matrix)
+library(tidyverse)
+library(glmGamPoi)
+# library(reticulate)
+# library(biomaRt)
+library(cowplot)
+library(DoubletFinder)
+library(mixtools)
+
+```
+
+```{r check directory}
+plan("multisession")
+set.seed(1234)
+future::plan("multicore")
+options(future.globals.maxSize = 8000 * 1024^2)
+
+#check directory
+here()
+```
+
+```{r Working Directory}
+getwd()
+# setwd("C:/Sen_Lab/")
+# list.files()
+```
+
+
+```{r}
+perturb.data <- Read10X(data.dir = "C:/Sen_Lab/Input_filtered_feature_bc_matrix")
+```
+```{r renaming loop}
+for (i in 1:5){
+  cat('hastag',i,",",sep = '')
+}
+```
+
+# Renaming of the hastag_* to hastag*
+```{r}
+hash <- as.matrix(perturb.data$`Antibody Capture`)
+rownames(hash) <- c("hastag1","hastag2","hastag3","hastag4","hastag5")
+```
+
+# Making of Seurat Objects of the perturb seq data set
+```{r}
+perturb <- CreateSeuratObject(counts = perturb.data$`Gene Expression`, project = "perturb_seq")
+perturb
+
+```
+
+# Adding CRISPR metadata to main meta.data
+```{r Converting CRISPR seurat object to a dataframe}
+perturb_seq.df <- data.frame(perturb.data$`CRISPR Guide Capture`, check.names = FALSE)
+```
+
+```{r Function for naming}
+# Function to remove the numbers in the gene_ids
+name_clean = function(x){
+  result_vector <- c()
+  for (i in x){
+    y <- substr(i, 1,nchar(i)-2)
+    result_vector <- c(result_vector, y)
+  }
+  return(result_vector)
+}
+```
+
+```{r Making a dummy dataframe new_df}
+# Making the column names of perturb_seq.df and assigning them as rownames of new_df
+cols <- colnames(perturb_seq.df)
+new_df <- data.frame(matrix(ncol = 0, nrow = length(cols)))
+rownames(new_df) <- cols
+
+# Taking the last character of barcodes as sample number
+new_df$sample_num <- substr(cols, nchar(cols), nchar(cols))
+
+# Adding columns to new_df
+new_df$sample_name <- 'PSO8'
+new_df$`sgRNAs_3+` <- 'none'
+new_df$`targets_3+`	<- 'none'
+new_df$`sgRNAs_2+`	<- 'none'
+new_df$`targets_2+` <- 'none'
+new_df$guide_ids <- 'none'
+new_df$gene_ids <- 'none'
+new_df$crispr_perturbation <- 'none'
+```
+
+```{r guide list that are perturbed }
+guide_set = c('EOMES', 'BC', 'TOX', 'JUN', 'CD8A', 'CDKN1B', 'TBX21', 'ARID1A')
+```
+
+
+```{r Adding gene columns to new_df}
+for (i in guide_set){
+    new_df[[i]] <- 'none'
+}
+```
+
+```{r Making the metadata}
+for (i in 1:length(cols)){
+    # For each barcode in perturb_seq.df, selecting only rows that have non zero values and adding them to guide_ids
+    result <- rownames(perturb_seq.df)[perturb_seq.df[, cols[i]] >=1 ]
+    new_df[i,'guide_ids'] <- paste(result, collapse = ", ")
+    
+    # Cleaning the names of guide RNAs and storing them in gene_ids column
+    guide_name <- name_clean(strsplit(new_df[i, 'guide_ids'],',')[[1]])
+    new_df[i,'gene_ids'] <- paste(guide_name, collapse = ", ")
+    
+    #If there are more than 1 guide RNA
+    if (length(strsplit(new_df[i, 'guide_ids'],',')[[1]])> 1){
+      new_df[i,'sgRNAs_3+'] <- 'multi'
+      new_df[i,'sgRNAs_2+'] <- 'multi'
+      new_df[i,'targets_3+'] <- 'multi'
+      new_df[i,'targets_2+'] <- 'multi'
+    }# for one guide RNA storing the name of the guide RNA 
+    else if (length(strsplit(new_df[i,  'guide_ids'],',')[[1]])== 1){
+      new_df[i,'sgRNAs_3+'] <- new_df[i,'guide_ids']
+      new_df[i,'sgRNAs_2+'] <- new_df[i,'guide_ids']
+      new_df[i,'targets_3+'] <- substr(new_df[i,'guide_ids'], 1, nchar(new_df[i,'guide_ids'])-2)
+      new_df[i,'targets_2+'] <- substr(new_df[i,'guide_ids'], 1, nchar(new_df[i,'guide_ids'])-2)
+    }# for no guide RNA
+    else{
+      new_df[i,'sgRNAs_3+'] <- 'none'
+      new_df[i,'sgRNAs_2+'] <- 'none'
+    }
+    #Adding guide RNAs detected for each barcode in crispr_perturbation column
+    new_df[i,'crispr_perturbation'] <- length(strsplit(new_df[i, 'guide_ids'],',')[[1]])
+}
+
+```
+
+```{r Assigning boolean values to each guide for each cell}
+for (i in 1:length(cols)){
+  guide_list <- trimws(strsplit(new_df[i, 'gene_ids'],',')[[1]])
+  for (j in guide_set){
+    if (j %in% guide_list){
+      new_df[i, j] <- 1
+    }else{
+       new_df[i, j] <- 0 
+      }
+  }
+ 
+}
+```
+
+```{r renaming the column names of genes boolean}
+for (i in guide_set){
+  t <- paste0(i,"_bool")
+  names(new_df)[names(new_df) == i] <- t
+}
+```
+
+
+
+# Adding metadata of CRISPR Knockout
+```{r }
+perturb@meta.data <- cbind(perturb@meta.data, new_df)
+```
+
+
+```{r Adding other assays}
+# Converting crispr counts matrix to seurat assay object
+perturb[['CRISPR']] = CreateAssayObject(counts = perturb.data$`CRISPR Guide Capture`)
+# head(perturb@meta.data, 10)
+# Making antibody capture as new assay
+perturb[["HTO"]] = CreateAssayObject(counts = hash)
+```
+
+# Setting the transcript counts matrix as the default assay matrix
+```{r}
+DefaultAssay(perturb) = "RNA"
+```
+
+#*************************** Previous protocol**************************************************************
+# Running QC and Testing the previous code block values generated for mitochrondrial trancripts
+```{r}
+#if human use "^MT-",and if mouse use "^mt-"
+# making a copy of perturb do see difference in calculation of percentage mitocondrial genes
+perturb -> perturb.mito_compare
+total_counts_per_cell <- colSums(perturb.mito_compare@assays$RNA@counts)
+mito_genes <- rownames(perturb.mito_compare)[grep("^MT-", rownames(perturb.mito_compare))]
+perturb.mito_compare$percent_mito <- colSums(perturb.mito_compare@assays$RNA@counts[mito_genes, ])/total_counts_per_cell
+head(mito_genes, 10)
+```
+#************************************************************************************************************
+
+# Revision into using Seurat functions to calculate each type of unnecessary transcripts in the experiment
+```{r}
+# Using in built function of Seurat for mitochondrial rna count
+perturb[["percent.mt"]] = PercentageFeatureSet(perturb, pattern = "^MT-")
+
+# Using in built function of Seurat for ribosomal rna count
+perturb[["percent.rb"]] = PercentageFeatureSet(perturb, pattern = "^RP[SL]")
+
+# Using in built function of Seurat for hb rna count
+perturb[["percent.hb"]] = PercentageFeatureSet(perturb, pattern = "^HB[^(P)]")
+
+# Using in built function of Seurat for plat rna count
+perturb[["percent.plat"]] = PercentageFeatureSet(perturb, pattern = "PECAM1|PF4")
+```
+#
+```{r Using of dyplr package and lambda function for calculating multi type of transcripts percent count}
+addperRNAcount <- function(seuratobject, type_rna, pattern){
+  seuratobject[[type_rna]] <- PercentageFeatureSet(seuratobject, pattern = pattern)
+  return(seuratobject)
+}
+perturb <- perturb %>%
+  (function(x) addperRNAcount(x,"percent.mt", "^MT-"))%>%
+  (function(x) addperRNAcount(x,"percent.rb", "^RP[SL]"))%>%
+  (function(x) addperRNAcount(x,"percent.hb", "^HB[^(P)]"))%>%
+  (function(x) addperRNAcount(x,"percent.plat", "PECAM1|PF4"))
+  
+```
+
+#*************************** Previous protocol**************************************************************
+# Removing cells with higher mitochondrial, ribosomal, hb, and plat transcripts
+```{r eval=FALSE}
+perturb.at_org_thr <- subset(perturb, subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & 
+                    percent.mt < 20 & percent.rb > 5 & percent.hb < 1 & percent.plat < 0.2)
+# Idents(object = Perturb) <- Perturb$orig.ident
+```
+
+#************************************************************************************************************
+
+# New QC threshold to remove cells with higher mitochondrial, ribosomal, hb, and plat transcripts
+```{r}
+perturb.new_qc <- subset(perturb, subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & 
+                    percent.mt < 10 & percent.rb > 5 & percent.hb < 1 & percent.plat < 0.2)
+```
+
+# Plots
+```{r Visualize QC metrics as a violin plot of unfiltered data and filtered data}
+# pdf("VlnPlot_unfiltered_data.pdf", height = 8, width = 10)
+# ?plot_annotation
+p1 <- VlnPlot(perturb, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rb","percent.hb", "percent.plat"), pt.size = 0, ncol = 3) + NoLegend() + plot_annotation ("Unfiltered data", theme = theme(plot.title = element_text(size = 28)))
+p2 <- VlnPlot(perturb.new_qc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rb","percent.hb", "percent.plat"), pt.size = 0, ncol = 3) + NoLegend() + plot_annotation("Filtered data", theme = theme(plot.title = element_text(size = 28)))
+plot_grid(ncol = 2,p1, p2 ) 
+
+```
+
+```{r Pearson correlation plot between the data points of Unfiltered data}
+# pdf("FeatureScatter_unfiltered.pdf", height = 3, width = 5)
+FeatureScatter(perturb, "nCount_RNA", "nFeature_RNA", pt.size = 0.5) + plot_annotation("Pearson correlation between cell and transcripts count of Unfiltered data")
+```
+
+
+# Cell cycle phase data Scaling
+
+# Cell cycle scoring analysis Using Original protocol of log normalize with revised QC- Method 1
+```{r}
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.We can segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+```
+
+```{r Normalization of RNA counts matrix using log normalization method (default param)}
+perturb.at_new_qc_lognorm = NormalizeData(perturb.new_qc)
+```
+
+```{r Finding variable genes and scaling the data by removing background noise of genes and mitochondrial genes}
+perturb.at_new_qc_lognorm = FindVariableFeatures(perturb.at_new_qc_lognorm, selection.method = "vst", verbose = F)
+perturb.at_new_qc_lognorm = ScaleData(perturb.at_new_qc_lognorm, vars.to.regress = c("nFeature_RNA", "percent.mt"),  verbose = F)
+```
+
+```{r running cell cycle scoring for variable genes}
+perturb.at_new_qc_lognorm <- CellCycleScoring(perturb.at_new_qc_lognorm, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+
+# view cell cycle scores and phase assignments
+# head(perturb.at_new_qc_lognorm[[]])
+```
+
+# PCA Prior scaling out cell cycle variance for genes in cell phases
+```{r running pca for genes prior to cell cycle scoring}
+perturb.at_new_qc_lognorm = RunPCA(perturb.at_new_qc_lognorm, reduction.name = "pca_priorphareg_", reduction.key = "PC_PPR_", features = c(s.genes, g2m.genes), verbose = F)
+perturb.at_new_qc_lognorm -> perturb.at_new_qc_lognorm_non_phase
+# perturb.at_new_qc_lognorm -> perturb.at_new_qc_lognorm_phased
+```
+```{r}
+ElbowPlot(perturb.at_new_qc_lognorm_non_phase, ndims = 60, reduction = "pca_priorphareg_")
+```
+
+
+# Checking cell_clustering Map for non_phased
+```{r}
+perturb.at_new_qc_lognorm_non_phase <- FindNeighbors(perturb.at_new_qc_lognorm_non_phase, reduction = "pca_priorphareg_", dims = 1:10)
+perturb.at_new_qc_lognorm_non_phase <- FindClusters(perturb.at_new_qc_lognorm_non_phase, resolution = 0.6, verbose = FALSE)
+perturb.at_new_qc_lognorm_non_phase <- RunTSNE(perturb.at_new_qc_lognorm_non_phase, reduction = "pca_priorphareg_", dims = 1:10)
+
+# Projecting singlet identities on TSNE visualization
+DimPlot(perturb.at_new_qc_lognorm_non_phase, group.by = "Phase")
+
+```
+
+
+# Removing cell phase effects from scaled data
+```{r}
+#  signals separating non-cycling cells and cycling cells will be maintained, but differences in cell cycle phase among proliferating cells (which are often uninteresting), will be regressed out of the data
+perturb.at_new_qc_lognorm_phased$CC.Difference <- perturb.at_new_qc_lognorm_phased$S.Score - perturb.at_new_qc_lognorm_phased$G2M.Score
+perturb.at_new_qc_lognorm_phased <- ScaleData(perturb.at_new_qc_lognorm_phased, vars.to.regress = "CC.Difference", verbose = F)
+```
+
+# PCA post scaling out cell cycle variance for genes in cell phases
+```{r running pca for genes post to cell cycle scoring}
+perturb.at_new_qc_lognorm_phased = RunPCA(perturb.at_new_qc_lognorm_phased, reduction.name = "pca_postphareg_", reduction.key = "PC_PTPR_", features = c(s.genes, g2m.genes), verbose = F)
+```
+# Checking cell_clustering Map for phased
+```{r}
+perturb.at_new_qc_lognorm_phased <- FindNeighbors(perturb.at_new_qc_lognorm_phased, reduction = "pca_postphareg_", dims = 1:10)
+perturb.at_new_qc_lognorm_phased <- FindClusters(perturb.at_new_qc_lognorm_phased, resolution = 0.6, verbose = FALSE)
+perturb.at_new_qc_lognorm_phased <- RunTSNE(perturb.at_new_qc_lognorm_phased, reduction = "pca_postphareg_", dims = 1:10)
+
+```
+
+```{r}
+# Projecting singlet identities on TSNE visualization
+plot_grid(ncol = 2, DimPlot(perturb.at_new_qc_lognorm_non_phase, group.by = "Phase"), DimPlot(perturb.at_new_qc_lognorm_phased, group.by = "Phase") ) 
+```
+
+
+# Sucessfully scaling of data was done 
+```{r}
+p1 <- DimPlot(perturb.at_new_qc_lognorm, reduction = "pca_priorphareg_") +  ggtitle("Unscaled based on cell cycle")
+p2 <- DimPlot(perturb.at_new_qc_lognorm, reduction = "pca_postphareg_") +  ggtitle("Scaled based on cell cycle")
+plot_grid(p1, p2, ncol = 2)
+```
+
+
+# Expect 4% doublets when loading ~10K cells
+```{r}
+nExp <- round(ncol(perturb.at_new_qc_lognorm_non_phase) * 0.04)
+perturb.at_new_qc_lognorm_non_phase <- doubletFinder(perturb.at_new_qc_lognorm_non_phase, pN = 0.25, pK = 0.09, nExp = nExp, PCs = 1:10)
+
+DF.name = colnames(perturb.at_new_qc_lognorm_non_phase@meta.data)[grepl("DF.classification", colnames(perturb.at_new_qc_lognorm_non_phase@meta.data))]
+
+plot_grid(ncol = 2, DimPlot(perturb.at_new_qc_lognorm_non_phase, group.by = "orig.ident"),
+                   DimPlot(perturb.at_new_qc_lognorm_non_phase, group.by = DF.name))
+```
+
+
+```{r}
+VlnPlot(perturb.at_new_qc_lognorm_non_phase, features = "nFeature_RNA", group.by = DF.name, pt.size = 0.1)
+```
+# Remove all Doublets columns
+
+```{r}
+perturb.at_new_qc_lognorm_non_phase <- perturb.at_new_qc_lognorm_non_phase[, perturb.at_new_qc_lognorm_non_phase@meta.data[, DF.name] == "Singlet"]
+```
+
+##################################################################################################################################
+
+# Demultiplexing hastags
+```{r steps are antibody capture normalization, and demutiplexing}
+perturb.at_new_qc_lognorm_non_phase <- NormalizeData(perturb.at_new_qc_lognorm_non_phase, assay = "HTO", normalization.method = "CLR")
+perturb.at_new_qc_lognorm_non_phase <- HTODemux(perturb.at_new_qc_lognorm_non_phase, assay = "HTO", positive.quantile = 0.99)
+```
+#Info on singlets, doublets and negative in antibody capture
+```{r}
+table(perturb.at_new_qc_lognorm_non_phase$HTO_classification.global)
+```
+
+# Plots
+```{r}
+# rownames(perturb.at_new_qc_lognorm@assays$HTO)
+RidgePlot(perturb.at_new_qc_lognorm_non_phase, assay = "HTO", 
+          features = c("hastag1", "hastag2", "hastag3", "hastag4", "hastag5"), ncol = 3)
+```
+
+```{r}
+# change of active identity to HTO_classification.global column identity
+# perturb.at_new_qc_lognorm -> copy_perturb.at_new_qc_lognorm
+Idents(perturb.at_new_qc_lognorm_non_phase) <- "HTO_classification.global"
+VlnPlot(perturb.at_new_qc_lognorm_non_phase, features = "nCount_RNA", pt.size = 0.1, log = TRUE)
+```
+# Removing umbigious tags
+```{r}
+perturb.at_new_qc_lognorm_non_phase <- subset(perturb.at_new_qc_lognorm_non_phase, idents = "Negative", invert = TRUE)
+```
+# Plots
+```{r}
+# 
+Idents(perturb.at_new_qc_lognorm_non_phase) <- "HTO_classification"
+RidgePlot(perturb.at_new_qc_lognorm_non_phase, assay = "HTO", 
+          features = c("hastag1", "hastag2", "hastag3", "hastag4", "hastag5"), ncol = 3)
+```
+
+```{r Looking at distribution of Singlets and Doublets distribution in Antibody capture assay}
+perturb.at_new_qc_lognorm_non_phase <- ScaleData(perturb.at_new_qc_lognorm_non_phase, features = rownames(perturb.at_new_qc_lognorm_non_phase@assays$HTO), assay = "HTO", verbose = F)
+perturb.at_new_qc_lognorm_non_phase <- RunPCA(perturb.at_new_qc_lognorm_non_phase, assay = "HTO", 
+                                              reduction.name = "pca_antibc_", reduction.key = "PC_ATBC_", 
+                                              features = rownames(perturb.at_new_qc_lognorm_non_phase@assays$HTO), 
+                                              approx = F)
+perturb.at_new_qc_lognorm_non_phase <- RunTSNE(perturb.at_new_qc_lognorm_non_phase, 
+                                               reduction = "pca_antibc_", 
+                                               reduction.name = "tsne_antibc_",
+                                               reduction.key = "tSNE_ATBC_", 
+                                               dims = 1:8, perplexity = 100)
+```
+# Plots
+```{r}
+Idents(perturb.at_new_qc_lognorm_non_phase) <- "HTO_classification.global"
+DimPlot(perturb.at_new_qc_lognorm_non_phase, reduction = "tsne_antibc_")
+```
+
+```{r}
+HTOHeatmap(perturb.at_new_qc_lognorm_non_phase, assay = "HTO")
+```
+
+# Removing Doublets
+```{r}
+perturb.at_new_qc_lognorm_non_phase.singlet <- subset(perturb.at_new_qc_lognorm_non_phase, idents = "Doublet", invert = TRUE)
+# perturb.at_new_qc_lognorm.singlet -> copy_perturb.at_new_qc_lognorm.singlet
+```
+
+# Plots
+```{r}
+# 
+Idents(perturb.at_new_qc_lognorm_non_phase.singlet) <- "HTO_classification.global"
+RidgePlot(perturb.at_new_qc_lognorm_non_phase.singlet, assay = "HTO", 
+          features = c("hastag1", "hastag2", "hastag3", "hastag4", "hastag5"), ncol = 3)
+```
+
+```{r}
+HTOHeatmap(perturb.at_new_qc_lognorm_non_phase.singlet, assay = "HTO")
+```
+
+```{r examine for the potential presence of batch effects}
+# Select the top 2000 most variable features
+perturb.at_new_qc_lognorm_non_phase.singlet <- FindVariableFeatures(perturb.at_new_qc_lognorm_non_phase.singlet, selection.method = "mean.var.plot", nfeatures = 2000)
+
+# Scaling RNA data, we only scale the variable features here for efficiency
+perturb.at_new_qc_lognorm_non_phase.singlet <- ScaleData(perturb.at_new_qc_lognorm_non_phase.singlet, features = VariableFeatures(perturb.at_new_qc_lognorm_non_phase.singlet))
+
+# Run PCA
+perturb.at_new_qc_lognorm_non_phase.singlet <- RunPCA(perturb.at_new_qc_lognorm_non_phase.singlet, features = VariableFeatures(perturb.at_new_qc_lognorm_non_phase.singlet), reduction.name = "pca_antibc_sing", reduction.key = "PC_ATBCSING_", approx = F)
+```
+# Plots
+```{r Elbow}
+ElbowPlot(perturb.at_new_qc_lognorm_non_phase.singlet, ndims = 60, reduction = "pca_antibc_sing")
+```
+
+```{r}
+# We select the top 10 PCs for clustering and tSNE based on PCElbowPlot
+perturb.at_new_qc_lognorm_non_phase.singlet <- FindNeighbors(perturb.at_new_qc_lognorm_non_phase.singlet,reduction = "pca_antibc_sing", dims = 1:10)
+perturb.at_new_qc_lognorm_non_phase.singlet <- FindClusters(perturb.at_new_qc_lognorm_non_phase.singlet, resolution = 0.6, verbose = FALSE)
+perturb.at_new_qc_lognorm_non_phase.singlet <- RunTSNE(perturb.at_new_qc_lognorm_non_phase.singlet, reduction.name = "tsne_antibcsing_",
+  reduction.key = "tSNE_ATBCSING_", reduction = "pca_antibc_sing", dims = 1:10)
+```
+# Plots
+```{r}
+# Projecting singlet identities on TSNE visualization
+DimPlot(perturb.at_new_qc_lognorm_non_phase.singlet, reduction = "tsne_antibcsing_", group.by = "HTO_maxID")
+```
+
+```{r}
+# Idents(perturb.at_new_qc_lognorm_non_phase.singlet) = "seurat_clusters"
+plot_grid(ncol = 2, VlnPlot(perturb.at_new_qc_lognorm_non_phase.singlet,assay = "CRISPR",features = c("CDKN1B-1","CDKN1B-2","CDKN1B-3","CDKN1B-4","CDKN1B-5"),group.by = "HTO_classification" ), VlnPlot(perturb.at_new_qc_lognorm_non_phase.singlet,assay = "RNA",
+        features = c("CD8A","CD8B","TOX","EOMES","TBX21","JUN","ARID1A","CDKN1B"), group.by = "HTO_classification"))
+```
+
+```{r}
+# find all markers of cluster 4
+cluster4.markers <- FindMarkers(perturb.at_new_qc_lognorm.singlet, ident.1 = 4)
+head(cluster4.markers, n = 5)
+```
+########################################################################################################################
+```{r}
+# perturb.at_new_qc_lognorm_non_phase.singlet.filtered <- perturb.at_new_qc_lognorm_non_phase.singlet
+```
+
+# Perturb signature in Day 6
+```{r}
+perturb.day6 <- subset(perturb.at_new_qc_lognorm_non_phase.singlet, crispr_perturbation == 1 & hash.ID == "hastag4")
+```
+
+# Plots
+```{r}
+# Idents(perturb.day6) <- perturb.day6$gene_ids
+
+DotPlot(perturb.day6,features = c("CD8A","CD8B","TOX","EOMES","TBX21","JUN","ARID1A","CDKN1B"))
+```
+```{r}
+# Idents(perturb.day6) <- "seurat_clusters"
+plot_grid(ncol = 3, VlnPlot(perturb.day6,features = c("CD8A","CD8B"), group.by = "CD8A_bool"),VlnPlot(perturb.day6,features = c("JUN"), group.by = "JUN_bool"), VlnPlot(perturb.day6,features = c("ARID1A"), group.by = "ARID1A_bool"), VlnPlot(perturb.day6,features = c("TOX"), group.by = "TOX_bool"), VlnPlot(perturb.day6,features = c("EOMES"), group.by = "EOMES_bool"), VlnPlot(perturb.day6,features = c("CDKN1B"), group.by = "CDKN1B_bool"),VlnPlot(perturb.day6,features = c("TBX21"), group.by = "TBX21_bool") )
+
+```
+
+```{r test}
+test_perturb <- perturb.at_new_qc_lognorm_non_phase.singlet.filtered
+```
+
+
+```{r}
+perturb.day6@meta.data <- perturb.day6@meta.data %>%
+  mutate(perturb_state = if_else(gene_ids == "BC",'NT','Perturbed'))
+
+# test_perturb@meta.data <- test_perturb@meta.data %>%
+#   mutate(perturb_state = case_when(crispr_perturbation > 1 ~ 'NT',
+#                                    crispr_perturbation == 0 ~ 'NP',
+#                                   crispr_perturbation == 1~'Perturbed'))
+```
+
+```{r}
+perturb.day6@meta.data <- perturb.day6@meta.data %>%
+  mutate(gene_id_new = if_else(gene_ids == 'BC', 'NT', gene_ids))
+```
+
+```{r}
+table(perturb.day6@meta.data$perturb_state)
+```
+
+```{r}
+
+perturb.day6 <- CalcPerturbSig(perturb.day6, 
+                               assay = "RNA", 
+                               slot = "data", 
+                               gd.class = "gene_ids", 
+                               nt.cell.class = "BC", 
+                               reduction = "pca_priorphareg_", 
+                               num.neighbors = 5,
+                               ndims = 10, 
+                               new.assay.name = "PRTB")
+```
+```{r}
+?ScaleData
+```
+
+
+```{r}
+# Prepare PRTB assay for dimensionality reduction: 
+# # Normalize data, find variable features and center data.
+# DefaultAssay(object = eccite) <- 'PRTB'
+
+# Use variable features from RNA assay.
+VariableFeatures(perturb.day6) <- VariableFeatures(object = perturb.day6[["RNA"]])
+perturb.day6 <- ScaleData(perturb.day6, assay = "PRTB", do.scale = F, do.center = T)
+
+# Run PCA to reduce the dimensionality of the data.
+perturb.day6 <- RunPCA(perturb.day6, assay = "PRTB", features = VariableFeatures(perturb.day6),  reduction.key = 'prtbpca', reduction.name = 'prtbpca')
+
+# Run UMAP to visualize clustering in 2-D.
+perturb.day6 <- RunUMAP(perturb.day6, 
+  dims = 1:40, reduction = 'prtbpca', reduction.key = 'prtbumap', reduction.name = 'prtbumap')
+```
+
+# Plots
+```{r}
+# Projecting singlet identities on TSNE visualization
+DimPlot(perturb.day6, reduction = "prtbumap", group.by = "gene_ids",  
+  ncol = 1, 
+  pt.size = 0.2)
+```
+```{r}
+?RunMixscape
+```
+
+
+
+```{r}
+# install.packages('mixtools')
+# Run mixscape.
+perturb.day6.mixscape <- RunMixscape(
+  perturb.day6, 
+  assay = "PRTB", 
+  slot = "scale.data", 
+  labels = "gene_ids",
+  logfc.threshold = 0.01,
+  nt.class.name = "BC",
+  min.de.genes = 5, 
+  iter.num = 10, 
+  de.assay = "RNA", 
+  verbose = F,
+  prtb.type = "KO")
+```
